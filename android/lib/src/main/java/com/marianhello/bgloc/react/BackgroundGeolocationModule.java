@@ -2,6 +2,14 @@ package com.marianhello.bgloc.react;
 
 import android.content.Context;
 
+import android.content.BroadcastReceiver;
+import android.support.v4.content.LocalBroadcastManager;
+
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.os.Bundle;
+import android.app.ActivityManager;
+
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.Callback;
 import com.facebook.react.bridge.LifecycleEventListener;
@@ -12,6 +20,7 @@ import com.facebook.react.bridge.ReadableMap;
 import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.modules.core.DeviceEventManagerModule;
+import com.facebook.react.HeadlessJsTaskService;
 import com.marianhello.bgloc.BackgroundGeolocationFacade;
 import com.marianhello.bgloc.Config;
 import com.marianhello.bgloc.PluginDelegate;
@@ -21,10 +30,13 @@ import com.marianhello.bgloc.data.BackgroundLocation;
 import com.marianhello.bgloc.react.data.LocationMapper;
 import com.marianhello.logging.LogEntry;
 import com.marianhello.logging.LoggerManager;
+import com.marianhello.bgloc.react.service.LocationHeadlessService;
+import com.marianhello.bgloc.service.LocationServiceImpl;
 
 import org.json.JSONException;
 
 import java.util.Collection;
+import java.util.List;
 
 public class BackgroundGeolocationModule extends ReactContextBaseJavaModule implements LifecycleEventListener, PluginDelegate {
 
@@ -45,6 +57,7 @@ public class BackgroundGeolocationModule extends ReactContextBaseJavaModule impl
     private static final int PERMISSIONS_REQUEST_CODE = 1;
 
     private BackgroundGeolocationFacade facade;
+    private BroadcastReceiver headlessLocationBroadcastReceiver;
     private org.slf4j.Logger logger;
 
     public static class ErrorMap {
@@ -88,6 +101,59 @@ public class BackgroundGeolocationModule extends ReactContextBaseJavaModule impl
         facade = new BackgroundGeolocationFacade(getContext(), this);
         logger = LoggerManager.getLogger(BackgroundGeolocationModule.class);
     }
+
+    private BroadcastReceiver serviceBroadcastReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            Bundle bundle = intent.getExtras();
+            int action = bundle.getInt("action");
+
+             switch (action) {
+                case LocationServiceImpl.MSG_ON_LOCATION: {
+                    logger.debug("Received MSG_ON_LOCATION FOR HEADLESS");
+
+                     if (!isAppOnForeground((context))) {
+
+                         BackgroundLocation location = (BackgroundLocation) bundle.getParcelable("payload");
+
+                         Bundle locationBundle = new Bundle();
+                        locationBundle.putDouble("latitude", location.getLatitude());
+                        locationBundle.putDouble("longitude", location.getLongitude());
+                        locationBundle.putLong("time", location.getTime());
+                        locationBundle.putFloat("accuracy",location.getAccuracy());
+
+                         Intent serviceIntent = new Intent(context, LocationHeadlessService.class);
+                        serviceIntent.putExtras(locationBundle);
+
+                         context.startService(serviceIntent);
+                        HeadlessJsTaskService.acquireWakeLockNow(context);
+                    }
+
+                     return;
+                }
+
+             }
+        }
+    };
+        private boolean isAppOnForeground(Context context) {
+        /**
+         * We need to check if app is in foreground otherwise the app will crash.
+         * http://stackoverflow.com/questions/8489993/check-android-application-is-in-foreground-or-not
+         **/
+        ActivityManager activityManager = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
+        List<ActivityManager.RunningAppProcessInfo> appProcesses = activityManager.getRunningAppProcesses();
+        if (appProcesses == null) {
+            return false;
+        }
+        final String packageName = context.getPackageName();
+        for (ActivityManager.RunningAppProcessInfo appProcess : appProcesses) {
+            if (appProcess.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+                    && appProcess.processName.equals(packageName)) {
+                return true;
+            }
+        }
+        return false;
+        }
 
     @Override
     public String getName() {
@@ -135,11 +201,14 @@ public class BackgroundGeolocationModule extends ReactContextBaseJavaModule impl
     @ReactMethod
     public void start() {
         facade.start();
+        LocalBroadcastManager.getInstance(getContext()).registerReceiver(serviceBroadcastReceiver,
+        new IntentFilter(LocationServiceImpl.ACTION_BROADCAST));
     }
 
     @ReactMethod
     public void stop() {
         facade.stop();
+        LocalBroadcastManager.getInstance(getContext()).unregisterReceiver(serviceBroadcastReceiver);
     }
 
     @ReactMethod
